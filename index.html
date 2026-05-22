@@ -416,7 +416,7 @@
       </div>
 
       <div class="search-wrap">
-        <input type="text" id="search-input" class="search-input" placeholder="Hanapin ang iyong pangalan…" autocomplete="off" inputmode="search">
+        <input type="text" id="search-input" class="search-input" placeholder="Naglo-load ng listahan…" autocomplete="off" inputmode="search" disabled>
         <span class="search-icon">🔍</span>
       </div>
       <ul class="results-list" id="results-list"></ul>
@@ -611,23 +611,53 @@
   let guestCount    = 1;
   const selectedDietary = new Set();
 
-  // ── Storage helpers ─────────────────────────────────────
-  function loadStorage() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch { return {}; }
-  }
-  function saveStorage(data) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
-  }
+  // ── Live store (synced from Sheets) ─────────────────────
+  let liveStore = {}; // { "Name": { attending, guestCount, submittedAt, ... } }
+
   function groupKey(g) { return g.names[0]; }
 
-  function markSubmitted(key, data) {
-    const s = loadStorage();
-    s[key] = data;
-    saveStorage(s);
-    updateCapacity(s);
+  // Fetch current submissions from Google Sheets via Apps Script
+  async function fetchLiveStore() {
+    try {
+      const res = await fetch(`${APPS_SCRIPT_URL}?action=getAll`, { method: 'GET' });
+      const data = await res.json();
+      // Apps Script returns array of row objects: [{ name, attending, guestCount, guestNames, dietary, message, timestamp }, ...]
+      const store = {};
+      (data || []).forEach(row => {
+        if (row.name) {
+          store[row.name] = {
+            attending:  row.attending === 'true' || row.attending === true,
+            guestCount: parseInt(row.guestCount) || 0,
+            guestNames: row.guestNames || '',
+            dietary:    row.dietary || '',
+            submittedAt: row.timestamp || ''
+          };
+        }
+      });
+      liveStore = store;
+      updateCapacity(liveStore);
+    } catch (err) {
+      console.warn('Could not fetch live RSVP data:', err);
+      // Fall back to localStorage as offline cache
+      try { liveStore = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch { liveStore = {}; }
+      updateCapacity(liveStore);
+    }
   }
+
+  // After a successful submit, optimistically update local cache too
+  function markSubmitted(key, data) {
+    liveStore[key] = data;
+    // Also cache locally as fallback
+    try {
+      const cache = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      cache[key] = data;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+    } catch {}
+    updateCapacity(liveStore);
+  }
+
   function getSubmission(key) {
-    return loadStorage()[key] || null;
+    return liveStore[key] || null;
   }
 
   // ── Capacity display ────────────────────────────────────
@@ -639,6 +669,13 @@
     document.getElementById('cap-label').textContent = `${confirmed} / ${MAX_CAPACITY} confirmed`;
     document.getElementById('capacity-bar').style.width = pct + '%';
   }
+
+  // Fetch on load, then refresh every 30 seconds
+  fetchLiveStore().then(() => {
+    searchInput.placeholder = 'Hanapin ang iyong pangalan…';
+    searchInput.disabled = false;
+  });
+  setInterval(fetchLiveStore, 30000);
 
   // ── Fuzzy search ────────────────────────────────────────
   function normalize(s) { return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
@@ -913,8 +950,7 @@
     document.getElementById('step-indicator').style.display = n===4 ? 'none' : 'flex';
   }
 
-  // Init capacity
-  updateCapacity(loadStorage());
+  // (capacity init is handled by fetchLiveStore above)
 
   // ── Falling leaves canvas ─────────────────────────────────
   const canvas = document.getElementById('leaf-canvas');
