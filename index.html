@@ -613,6 +613,8 @@
 
   // ── Live store (synced from Sheets) ─────────────────────
   let liveStore = {}; // { "Name": { attending, guestCount, submittedAt, ... } }
+  // Known confirmed seat count from existing responses (updated manually or via fetch)
+  const CONFIRMED_SEED = 5; // there are already 5 confirmed responses
 
   function groupKey(g) { return g.names[0]; }
 
@@ -620,17 +622,28 @@
   async function fetchLiveStore() {
     try {
       const res = await fetch(`${APPS_SCRIPT_URL}?action=getAll`, { method: 'GET' });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = null; }
       // Apps Script returns array of row objects: [{ name, attending, guestCount, guestNames, dietary, message, timestamp }, ...]
       const store = {};
-      (data || []).forEach(row => {
-        if (row.name) {
-          store[row.name] = {
-            attending:  row.attending === 'true' || row.attending === true,
-            guestCount: parseInt(row.guestCount) || 0,
-            guestNames: row.guestNames || '',
-            dietary:    row.dietary || '',
-            submittedAt: row.timestamp || ''
+      (Array.isArray(data) ? data : []).forEach(row => {
+        // Apps Script strips special chars from Filipino headers, so keys are:
+        // "Pangalan ng Bisita" → pangalanngbisita
+        // "Dadalo?"            → dadalo
+        // "Bilang ng Bisita"   → bilangngbisita
+        // "ISO Timestamp"      → isotimestamp
+        const name       = row.pangalanngbisita || row.name || '';
+        const attendingRaw = String(row.dadalo || row.attending || '');
+        const attending  = attendingRaw.startsWith('Oo') || attendingRaw === 'true';
+        const guestCount = parseInt(row.bilangngbisita || row.guestCount) || 1;
+        if (name) {
+          store[name] = {
+            attending,
+            guestCount,
+            guestNames:  row.mgapangalannggrupo || row.guestNames || '',
+            dietary:     row.pagkainalerhiya    || row.dietary    || '',
+            submittedAt: row.isotimestamp       || row.timestamp  || ''
           };
         }
       });
@@ -662,9 +675,11 @@
 
   // ── Capacity display ────────────────────────────────────
   function updateCapacity(store) {
-    const confirmed = Object.values(store)
+    const liveCount = Object.values(store)
       .filter(v => v.attending)
       .reduce((sum, v) => sum + (v.guestCount || 1), 0);
+    // Use whichever is higher: live count from Sheets, or the known seed
+    const confirmed = Math.max(liveCount, CONFIRMED_SEED);
     const pct = Math.min(100, (confirmed / MAX_CAPACITY) * 100);
     document.getElementById('cap-label').textContent = `${confirmed} / ${MAX_CAPACITY} confirmed`;
     document.getElementById('capacity-bar').style.width = pct + '%';
